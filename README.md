@@ -4,7 +4,19 @@
 compiled to WebAssembly with Emscripten, drawing with WebGL 2.
 
 **No game data is included.** Players choose the folder of their own Battlespire install (GOG or Steam)
-and the page reads it in the browser tab; nothing is uploaded.
+and the page reads it in the browser tab; nothing is uploaded. The files it needs are kept in the
+browser's IndexedDB, so later visits offer Play without choosing the folder again, and so are the saved
+games and settings.
+
+## Storage
+
+All in the site's IndexedDB, all in `web/shell.html`:
+
+- `openbattlespire-install`: the install's files as the page copied them (`files`: Blobs keyed by path;
+  `meta`: their list, written last so a copy cut short is never offered). "Forget these files" clears it.
+- `/saves` and `/libsdl`: Emscripten IDBFS mounts with `autoPersist`, read in before the game starts.
+  `/saves` is `--saves` (our save slots and the CharacterMaker's classes); `/libsdl` holds SDL's pref
+  path, where `settings.ini` goes. Each file the engine writes is copied to IndexedDB when it closes it.
 
 Not affiliated with or endorsed by Bethesda. The Elder Scrolls and Battlespire are trademarks of their
 owners.
@@ -44,5 +56,5 @@ command line.
 ## Status
 
 The title screen, menus and levels run, from GAME.EXE, GAMEDATA and MUSIC (about 230 MB, held in memory);
-the CD image is optional. Not done yet: keeping the files between visits (so the folder is picked once),
-saved games that survive a reload, browser key conflicts (Ctrl+W, Esc, F12), deployment.
+the CD image is optional. The files, the saved games and the settings are kept between visits. Not done
+yet: browser key conflicts (Ctrl+W, Esc, F12), exporting and importing saves.

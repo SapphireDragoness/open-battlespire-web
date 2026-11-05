@@ -12,10 +12,13 @@
   h1 { font-weight: 600; letter-spacing: .02em; margin: 0 0 1rem; }
   p { margin: 0 0 1rem; }
   .muted { color: #8f8a7e; font-size: .9rem; }
-  label.button { display: inline-block; padding: .6rem 1.1rem; border-radius: 6px; cursor: pointer;
-                 background: #c9a24a; color: #17130a; font-weight: 600; }
-  label.button:hover { background: #ddb65c; }
-  label.button[aria-disabled="true"] { opacity: .5; pointer-events: none; }
+  .button { display: inline-block; padding: .6rem 1.1rem; border-radius: 6px; cursor: pointer; border: 0;
+            background: #c9a24a; color: #17130a; font: inherit; font-weight: 600; margin: 0 .5rem .5rem 0; }
+  .button:hover { background: #ddb65c; }
+  .button.quiet { background: #2a2c2b; color: #d8d4c8; }
+  .button.quiet:hover { background: #363937; }
+  .button[aria-disabled="true"], .button:disabled { opacity: .5; pointer-events: none; }
+  [hidden] { display: none !important; }
   #folder { display: none; }
   #status { min-height: 1.5em; margin-top: 1rem; }
   #status.error { color: #e57b6b; }
@@ -31,12 +34,20 @@
   <h1>OpenBattlespire</h1>
   <p>An open-source engine for <i>An Elder Scrolls Legend: Battlespire</i> (1997). It plays the game
      from your own copy: choose the folder where Battlespire is installed (the GOG or Steam release).</p>
-  <p class="muted">The files are read here, in this browser tab. Nothing is uploaded anywhere.</p>
+  <p class="muted">The files are read here, in this browser tab, and kept in this browser's storage so
+     you only choose the folder once. Nothing is uploaded anywhere.</p>
+  <div id="kept" hidden>
+    <p id="kept-what"></p>
+    <p><button class="button" id="play">Play</button>
+       <button class="button quiet" id="forget">Forget these files</button></p>
+  </div>
   <p><label class="button" id="pick" aria-disabled="true">Loading…
        <input type="file" id="folder" webkitdirectory></label></p>
   <p><label><input type="checkbox" id="with-cd"> Also load the CD image (<code>game.gog</code>):
      the intro video and the voices, but about 500 MB more memory</label></p>
   <div id="status" role="status"></div>
+  <p class="muted">Your saved games and settings are kept in this browser too. Clearing this site's data
+     deletes them.</p>
   <p class="muted">Not affiliated with or endorsed by Bethesda. The Elder Scrolls and Battlespire are
      trademarks of their owners.</p>
 </div>
@@ -48,20 +59,96 @@ const $ = id => document.getElementById(id);
 const status = (text, error) => { $('status').textContent = text; $('status').classList.toggle('error', !!error); };
 $('canvas').addEventListener('contextmenu', e => e.preventDefault()); /* the right button swings */
 
-/* What the engine reads, as paths in the install (any case): the game, its data and music, and
- * with the box ticked the CD image. */
+const MB = bytes => Math.round(bytes / 1048576);
+const sum = files => files.reduce((n, f) => n + f.size, 0);
+const isCd = rel => ['GAME.GOG', 'GAME.INS'].includes(rel.toUpperCase());
+
+/* What the engine reads, as paths in the install (any case): the game, its data and music, the original
+ * game's saves (the Load screen's second page), and with the box ticked the CD image. */
 function wanted(rel, withCd) {
   const p = rel.toUpperCase();
-  return p === 'GAME.EXE' || p.startsWith('GAMEDATA/') || p.startsWith('MUSIC/') ||
-         (withCd && (p === 'GAME.GOG' || p === 'GAME.INS'));
+  return p === 'GAME.EXE' || p.startsWith('GAMEDATA/') || p.startsWith('MUSIC/') || /^SAVE[0-9]\//.test(p) ||
+         (withCd && isCd(p));
 }
+
+/* IndexedDB, as promises. */
+const request = req => new Promise((ok, fail) => { req.onsuccess = () => ok(req.result); req.onerror = () => fail(req.error); });
+const finished = tx => new Promise((ok, fail) => {
+  tx.oncomplete = () => ok();
+  tx.onerror = tx.onabort = () => fail(tx.error);
+});
+
+/* ---- the install, kept between visits ----
+ * IndexedDB 'openbattlespire-install': 'files' holds each file the engine reads as a Blob, keyed by its path
+ * in the install; 'meta' holds 'install' = {files: [{rel, size}], cd}. That record is written last, so a
+ * copy cut short (the tab closed, the storage full) is never offered. */
+const kept = {
+  db: null,
+  open() {
+    if (!this.db) {
+      const req = indexedDB.open('openbattlespire-install', 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore('files'); req.result.createObjectStore('meta'); };
+      this.db = request(req);
+    }
+    return this.db;
+  },
+  async info() {
+    const db = await this.open();
+    return (await request(db.transaction('meta').objectStore('meta').get('install'))) || null;
+  },
+  async forget() {
+    const db = await this.open();
+    const tx = db.transaction(['files', 'meta'], 'readwrite');
+    tx.objectStore('meta').clear();
+    tx.objectStore('files').clear();
+    await finished(tx);
+  },
+  /* files: {rel, size, blob}. One transaction a file: the CD image alone is 500 MB. */
+  async keep(files) {
+    await this.forget();
+    const db = await this.open();
+    for (const f of files) {
+      const tx = db.transaction('files', 'readwrite');
+      tx.objectStore('files').put(f.blob, f.rel);
+      await finished(tx);
+    }
+    const tx = db.transaction('meta', 'readwrite');
+    tx.objectStore('meta').put({ files: files.map(({ rel, size }) => ({ rel, size })),
+                                 cd: files.some(f => isCd(f.rel)) }, 'install');
+    await finished(tx);
+  },
+  async read(rel) {
+    const db = await this.open();
+    const blob = await request(db.transaction('files').objectStore('files').get(rel));
+    if (!blob) throw new Error(`${rel} is not among the kept files`);
+    return blob.arrayBuffer();
+  },
+};
+
+/* ---- saved games and settings ----
+ * The engine writes our saves to /saves (--saves: the slots, the CharacterMaker's classes) and settings.ini
+ * to SDL's pref path, under /libsdl. Both are IDBFS: files in memory, copied to IndexedDB each time the game
+ * closes one it wrote (autoPersist). */
+function mountSaves() {
+  const mounts = ['/saves', '/libsdl'].map(dir => { FS.mkdir(dir); return FS.mount(IDBFS, { autoPersist: true }, dir).mount; });
+  /* Reading them in creates files, and with autoPersist each one starts a sync of a tree not all read
+   * yet, which deletes from IndexedDB whatever isn't in memory. A busy state (truthy, not 'idb') holds
+   * those syncs off until it is all in. */
+  for (const m of mounts) m.idbPersistState = 'reading';
+  return new Promise((ok, fail) => FS.syncfs(true, err => {
+    for (const m of mounts) m.idbPersistState = 0;
+    err ? fail(err) : ok();
+  }));
+}
+
+/* ---- starting ---- */
 
 /* Copies files ({rel, size, read()}) into /data, then starts the game. */
 async function load(files, args) {
-  const total = files.reduce((n, f) => n + f.size, 0);
+  const total = sum(files);
   let done = 0;
   for (const f of files) {
-    status(`Reading ${f.rel} (${Math.round(done / 1048576)} of ${Math.round(total / 1048576)} MB)`);
+    status(`Reading ${f.rel} (${MB(done)} of ${MB(total)} MB)`);
     const path = '/data/' + f.rel;
     FS.mkdirTree(path.slice(0, path.lastIndexOf('/')));
     FS.writeFile(path, new Uint8Array(await f.read()));
@@ -74,19 +161,62 @@ async function load(files, args) {
   callMain(['-d', '/data', '--saves', '/saves', ...args]);
 }
 
+let keptInfo = null;
+
+/* The buttons, with what is kept (or null). */
+function ready(info) {
+  keptInfo = info;
+  $('kept').hidden = !info;
+  if (info)
+    $('kept-what').textContent = `Kept from your last visit: the Battlespire files (${MB(sum(info.files))} MB` +
+                                 (info.cd ? ', with the CD image).' : ').');
+  $('pick').firstChild.textContent = info ? 'Choose another folder' : 'Choose the Battlespire folder';
+  $('pick').classList.toggle('quiet', !!info);
+  busy(false);
+}
+
+function busy(on) {
+  $('pick').setAttribute('aria-disabled', String(on));
+  $('play').disabled = $('forget').disabled = on;
+}
+
 $('folder').addEventListener('change', async e => {
   /* webkitRelativePath starts with the chosen folder's own name: drop it. */
-  const files = [...e.target.files].map(f => ({
+  const all = [...e.target.files].map(f => ({
     rel: f.webkitRelativePath.slice(f.webkitRelativePath.indexOf('/') + 1),
-    size: f.size, read: () => f.arrayBuffer() }));
-  if (!files.some(f => f.rel.toUpperCase() === 'GAME.EXE')) {
+    size: f.size, blob: f, read: () => f.arrayBuffer() }));
+  e.target.value = ''; /* choosing the same folder again still fires change */
+  if (!all.some(f => f.rel.toUpperCase() === 'GAME.EXE')) {
     status('That folder has no GAME.EXE: choose the one Battlespire is installed in.', true);
     return;
   }
+  const files = all.filter(f => wanted(f.rel, $('with-cd').checked));
+  busy(true);
+  /* Storage the browser won't clear on its own when the disk fills: the saves live there too. */
+  navigator.storage?.persist?.().catch(() => {});
+  /* Kept while the game reads and runs; only the next visit needs it. */
+  kept.keep(files).then(() => console.log(`Kept the Battlespire files (${MB(sum(files))} MB) for next time.`),
+                        err => console.warn(`Could not keep the Battlespire files for next time: ${err}`));
+  try { await load(files, []); }
+  catch (err) { status(`Could not read the files: ${err}`, true); busy(false); }
+});
+
+$('play').addEventListener('click', async () => {
   const withCd = $('with-cd').checked;
-  $('pick').setAttribute('aria-disabled', 'true');
-  try { await load(files.filter(f => wanted(f.rel, withCd)), []); }
-  catch (err) { status(`Could not read the files: ${err}`, true); }
+  if (withCd && !keptInfo.cd) {
+    status('The kept files have no CD image: untick the box, or choose the folder again to keep it too.', true);
+    return;
+  }
+  busy(true);
+  const files = keptInfo.files.filter(f => wanted(f.rel, withCd)).map(f => ({ ...f, read: () => kept.read(f.rel) }));
+  try { await load(files, []); }
+  catch (err) { status(`Could not read the kept files (${err}): choose the folder again.`, true); busy(false); }
+});
+
+$('forget').addEventListener('click', async () => {
+  busy(true);
+  try { await kept.forget(); ready(null); status('The kept files are gone (your saved games are not).'); }
+  catch (err) { status(`Could not forget the files: ${err}`, true); busy(false); }
 });
 
 /* Development: on localhost, ?dev loads the install tools/serve.py serves (no picking on every reload),
@@ -105,15 +235,21 @@ var Module = {
   canvas: $('canvas'),
   print: text => console.log(text),
   printErr: text => console.warn(text),
-  onRuntimeInitialized() {
+  async onRuntimeInitialized() {
+    try { await mountSaves(); }
+    catch (err) { console.warn(`Saved games will not be kept: ${err}`); }
     const params = new URLSearchParams(location.search);
     const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
     if (local && params.has('dev')) {
       dev(params).catch(err => status(`Dev load failed: ${err}`, true));
       return;
     }
-    $('pick').firstChild.textContent = 'Choose the Battlespire folder';
-    $('pick').setAttribute('aria-disabled', 'false');
+    let info = null;
+    try {
+      info = await kept.info();
+      if (info) $('with-cd').checked = info.cd;
+    } catch (err) { console.warn(`No kept files: ${err}`); }
+    ready(info);
   },
 };
 </script>

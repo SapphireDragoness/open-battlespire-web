@@ -31,7 +31,8 @@ target_link_options(openbattlespire PRIVATE
     -sALLOW_MEMORY_GROWTH=1
     -sSTACK_SIZE=4MB              # native stacks are megabytes; Emscripten's default is 64 KB
     -sINVOKE_RUN=0                # the page starts the game once the files are in
-    -sEXPORTED_RUNTIME_METHODS=callMain,FS
-    -sFORCE_FILESYSTEM=1)
+    -sEXPORTED_RUNTIME_METHODS=callMain,FS,IDBFS   # IDBFS: else release builds drop it
+    -sFORCE_FILESYSTEM=1
+    -lidbfs.js)                   # the saves and settings, kept in IndexedDB (web/shell.html)
 
 add_custom_target(site ALL DEPENDS openbattlespire)
