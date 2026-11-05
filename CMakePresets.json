@@ -1,0 +1,29 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "web-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+        },
+        {
+            "name": "web-debug",
+            "displayName": "Web (debug)",
+            "inherits": "web-base",
+            "binaryDir": "${sourceDir}/build/debug",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        },
+        {
+            "name": "web-release",
+            "displayName": "Web (release)",
+            "inherits": "web-base",
+            "binaryDir": "${sourceDir}/build/release",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "web-debug", "configurePreset": "web-debug" },
+        { "name": "web-release", "configurePreset": "web-release" }
+    ]
+}

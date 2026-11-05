@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenBattlespire</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0d0e; color: #d8d4c8;
+               font: 16px/1.5 system-ui, sans-serif; }
+  #intro { max-width: 36rem; margin: 0 auto; padding: 3rem 1.5rem; }
+  h1 { font-weight: 600; letter-spacing: .02em; margin: 0 0 1rem; }
+  p { margin: 0 0 1rem; }
+  .muted { color: #8f8a7e; font-size: .9rem; }
+  label.button { display: inline-block; padding: .6rem 1.1rem; border-radius: 6px; cursor: pointer;
+                 background: #c9a24a; color: #17130a; font-weight: 600; }
+  label.button:hover { background: #ddb65c; }
+  label.button[aria-disabled="true"] { opacity: .5; pointer-events: none; }
+  #folder { display: none; }
+  #status { min-height: 1.5em; margin-top: 1rem; }
+  #status.error { color: #e57b6b; }
+  #game { display: none; position: fixed; inset: 0; align-items: center; justify-content: center; }
+  /* The largest 4:3 box in the window. SDL sizes the drawing buffer from this CSS size (the window
+     is resizable), so it must not depend on the buffer: width or height auto would shrink to nothing. */
+  #canvas { display: block; width: min(100vw, calc(100vh * 4 / 3)); height: min(100vh, calc(100vw * 3 / 4));
+            outline: none; }
+</style>
+</head>
+<body>
+<div id="intro">
+  <h1>OpenBattlespire</h1>
+  <p>An open-source engine for <i>An Elder Scrolls Legend: Battlespire</i> (1997). It plays the game
+     from your own copy: choose the folder where Battlespire is installed (the GOG or Steam release).</p>
+  <p class="muted">The files are read here, in this browser tab. Nothing is uploaded anywhere.</p>
+  <p><label class="button" id="pick" aria-disabled="true">Loading…
+       <input type="file" id="folder" webkitdirectory></label></p>
+  <p><label><input type="checkbox" id="with-cd"> Also load the CD image (<code>game.gog</code>):
+     the intro video and the voices, but about 500 MB more memory</label></p>
+  <div id="status" role="status"></div>
+  <p class="muted">Not affiliated with or endorsed by Bethesda. The Elder Scrolls and Battlespire are
+     trademarks of their owners.</p>
+</div>
+<div id="game"><canvas id="canvas" tabindex="-1"></canvas></div>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const status = (text, error) => { $('status').textContent = text; $('status').classList.toggle('error', !!error); };
+$('canvas').addEventListener('contextmenu', e => e.preventDefault()); /* the right button swings */
+
+/* What the engine reads, as paths in the install (any case): the game, its data and music, and
+ * with the box ticked the CD image. */
+function wanted(rel, withCd) {
+  const p = rel.toUpperCase();
+  return p === 'GAME.EXE' || p.startsWith('GAMEDATA/') || p.startsWith('MUSIC/') ||
+         (withCd && (p === 'GAME.GOG' || p === 'GAME.INS'));
+}
+
+/* Copies files ({rel, size, read()}) into /data, then starts the game. */
+async function load(files, args) {
+  const total = files.reduce((n, f) => n + f.size, 0);
+  let done = 0;
+  for (const f of files) {
+    status(`Reading ${f.rel} (${Math.round(done / 1048576)} of ${Math.round(total / 1048576)} MB)`);
+    const path = '/data/' + f.rel;
+    FS.mkdirTree(path.slice(0, path.lastIndexOf('/')));
+    FS.writeFile(path, new Uint8Array(await f.read()));
+    done += f.size;
+  }
+  status('');
+  $('intro').style.display = 'none';
+  $('game').style.display = 'flex';
+  $('canvas').focus();
+  callMain(['-d', '/data', '--saves', '/saves', ...args]);
+}
+
+$('folder').addEventListener('change', async e => {
+  /* webkitRelativePath starts with the chosen folder's own name: drop it. */
+  const files = [...e.target.files].map(f => ({
+    rel: f.webkitRelativePath.slice(f.webkitRelativePath.indexOf('/') + 1),
+    size: f.size, read: () => f.arrayBuffer() }));
+  if (!files.some(f => f.rel.toUpperCase() === 'GAME.EXE')) {
+    status('That folder has no GAME.EXE: choose the one Battlespire is installed in.', true);
+    return;
+  }
+  const withCd = $('with-cd').checked;
+  $('pick').setAttribute('aria-disabled', 'true');
+  try { await load(files.filter(f => wanted(f.rel, withCd)), []); }
+  catch (err) { status(`Could not read the files: ${err}`, true); }
+});
+
+/* Development: on localhost, ?dev loads the install tools/serve.py serves (no picking on every reload),
+ * and ?args=--level,l1.bs6 passes options to the game. */
+async function dev(params) {
+  const withCd = params.has('cd');
+  const list = await (await fetch('/dev-data/manifest.json')).json();
+  const files = list.filter(f => wanted(f.rel, withCd)).map(f => ({
+    rel: f.rel, size: f.size,
+    read: async () => { const r = await fetch('/dev-data/' + f.rel.split('/').map(encodeURIComponent).join('/'));
+                        if (!r.ok) throw new Error(`${f.rel}: ${r.status}`); return r.arrayBuffer(); } }));
+  await load(files, params.get('args') ? params.get('args').split(',') : []);
+}
+
+var Module = {
+  canvas: $('canvas'),
+  print: text => console.log(text),
+  printErr: text => console.warn(text),
+  onRuntimeInitialized() {
+    const params = new URLSearchParams(location.search);
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+    if (local && params.has('dev')) {
+      dev(params).catch(err => status(`Dev load failed: ${err}`, true));
+      return;
+    }
+    $('pick').firstChild.textContent = 'Choose the Battlespire folder';
+    $('pick').setAttribute('aria-disabled', 'false');
+  },
+};
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

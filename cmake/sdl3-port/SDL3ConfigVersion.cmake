@@ -1,0 +1,6 @@
+# The Emscripten port tracks SDL 3.2+, which the engine asks for.
+set(PACKAGE_VERSION "3.2.0")
+set(PACKAGE_VERSION_COMPATIBLE TRUE)
+if(PACKAGE_FIND_VERSION VERSION_EQUAL PACKAGE_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+endif()
